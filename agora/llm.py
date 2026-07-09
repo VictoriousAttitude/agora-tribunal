@@ -56,18 +56,24 @@ class LLM:
         return "".join(b.text for b in resp.content if b.type == "text")
 
     def structured(
-        self, *, model: str, system: str, user: str, tool: dict, label: str
+        self, *, model: str, system: str, user: str, tool: dict, label: str,
+        max_tokens: int | None = None,
     ) -> dict:
         """Force a single tool call and return its input payload."""
         resp = self.client.messages.create(
             model=model,
-            max_tokens=self.max_output_tokens,
+            max_tokens=max_tokens or self.max_output_tokens,
             system=system,
             messages=[{"role": "user", "content": user}],
             tools=[tool],
             tool_choice={"type": "tool", "name": tool["name"]},
         )
         self.meter.add(label, resp.usage)
+        if resp.stop_reason == "max_tokens":
+            raise RuntimeError(
+                f"structured output truncated at max_tokens (label={label}); "
+                "raise the cap for this call"
+            )
         for block in resp.content:
             if block.type == "tool_use":
                 return block.input

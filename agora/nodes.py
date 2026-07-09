@@ -55,7 +55,6 @@ JUDGE_TOOL = {
                             "type": "string",
                             "enum": [b.value for b in WarrantBand],
                         },
-                        "rationale": {"type": "string"},
                     },
                     "required": ["claim_id", "warrant_band"],
                 },
@@ -200,8 +199,9 @@ class Nodes:
             ),
             tool=JUDGE_TOOL,
             label="JUDGE",
+            max_tokens=16384,  # judge output scales with claim count
         )
-        for a in payload["assessments"]:
+        for a in payload.get("assessments", []):
             claim = by_id.get(a["claim_id"])
             if claim is None:
                 continue  # hallucinated id
@@ -213,7 +213,7 @@ class Nodes:
                 c.warrant_band = clamp_band(WarrantBand.WEAK, c.provenance)
 
         disagreements: list[Disagreement] = []
-        for d in payload["disagreements"]:
+        for d in payload.get("disagreements", []):
             ids = [i for i in d["claim_ids"] if i in by_id]
             if len(ids) < 2:
                 continue

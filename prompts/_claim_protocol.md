@@ -16,3 +16,4 @@ Turn your analysis into discrete, checkable claims. Rules:
 4. Provenance above ASSERTION requires evidence_refs. If you attach none, the claim is mechanically downgraded to ASSERTION and capped at a WEAK warrant. Do not inflate provenance; it costs you credibility and changes nothing.
 5. Never state confidence percentages. Confidence is derived from evidence by the Judge, not self-reported.
 6. Use depends_on / contradicts with existing claim ids where genuine logical relations exist. Do not invent ids.
+7. Submit at most 7 claims per turn. Merge minor observations; keep only claims that could change the decision.
