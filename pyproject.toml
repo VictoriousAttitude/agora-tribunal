@@ -1,0 +1,24 @@
+[project]
+name = "agora"
+version = "0.1.0"
+description = "Multi-agent deliberation engine with evidence-gated reasoning"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.40",
+    "langgraph>=0.4",
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

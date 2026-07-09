@@ -1,0 +1,34 @@
+# AGORA v0 configuration. Phase 1 scope (spec section 16): single critique round,
+# claim model + provenance gate, judge, warrant bands. No memory, no resolvers yet.
+
+models:
+  frontier: claude-opus-4-6
+  mid: claude-sonnet-4-6
+  small: claude-haiku-4-5-20251001
+
+# Debate core (spec section 5). v0: three debaters.
+roster:
+  - role: ARCHITECT
+    tier: frontier
+  - role: QA
+    tier: mid
+  - role: SCIENTIST
+    tier: frontier
+
+meta:
+  frame_tier: mid
+  judge_tier: frontier
+  synthesizer_tier: frontier
+
+budget:
+  max_total_tokens: 300000        # B_max hard cap (spec 9.4)
+  max_rounds: 1                   # R_max; Phase 2 raises this
+  max_output_tokens_per_call: 4096
+
+thresholds:
+  # Convergence requires no OPEN disagreements AND mean warrant >= this (spec 9.3)
+  min_mean_warrant: MODERATE
+
+paths:
+  prompts_dir: prompts
+  runs_dir: runs

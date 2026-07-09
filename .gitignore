@@ -1,0 +1,13 @@
+# Reference material, never commit
+awesome-agent-skills/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Run artifacts and secrets
+runs/
+.env

@@ -1,0 +1,1006 @@
+===============================================================================
+ AGORA — ARCHITECTURE SPECIFICATION
+ A Multi-Agent Deliberation Engine with Evidence-Gated Reasoning
+ Working codename: AGORA (rename freely). Target domain: Python backend + AI/ML.
+ Spec version: 1.0
+ Status: Foundational design reference (pre-implementation)
+===============================================================================
+
+HOW TO READ THIS DOCUMENT
+-------------------------------------------------------------------------------
+This is a design reference, not a tutorial. Sections 1–3 give the thesis and the
+evidentiary basis for every decision that follows — read them first, because the
+architecture is a direct consequence of published failure data, and skipping the
+"why" makes the "what" look arbitrary. Sections 4–11 are the system design proper
+(components, data models, control flow, memory). Sections 12–13 cover the concrete
+build and cost. Sections 14–17 cover failure mitigation, validation, and a phased
+roadmap. Section 18 is the reference list so every claim is traceable.
+
+Design maxim carried throughout (Anthropic, "Building Effective Agents"):
+    "Add complexity only when it demonstrably improves outcomes."
+This system is complexity. It must earn its place against a simpler baseline on
+YOUR tasks before it ships. Section 15 is how you prove that.
+
+
+===============================================================================
+ 1. EXECUTIVE SUMMARY / THESIS
+===============================================================================
+
+1.1 WHAT AGORA IS
+AGORA is a deliberation engine: a bounded set of specialized "expert" agents that
+argue and discuss a question, grounded against real evidence, adjudicated by a
+separate judge, and scored on a calibrated warrant scale. It is designed for
+technical decisions in Python backend and AI/ML development — architecture
+choices, design/code review, RAG and eval design, inference/deployment tradeoffs,
+security review — where the output is a *reasoned, evidence-backed decision*, not
+a code artifact produced by parallel agents.
+
+1.2 THE CORE THESIS: DELIBERATE WIDE, EXECUTE NARROW
+The central architectural commitment, forced by the field's two most credible
+production teams converging in 2025–2026:
+    - Deliberation is multi-agent. Diversity of grounded perspective plus
+      aggregation plus verification is where multi-agent genuinely helps.
+    - Execution is single-threaded. One executor implements the accepted
+      decision. Multiple agents writing/implementing in parallel is where
+      multi-agent reliably FAILS (Cognition, "Don't Build Multi-Agents").
+This split (a "brain/hands" decoupling) preserves the benefit and removes the
+dominant failure mode. See §2.6 and §3.1.
+
+1.3 NON-NEGOTIABLE PRINCIPLES (the "iron hooks")
+    P1  Every claim carries provenance. A claim is TOOL_RESULT, RETRIEVED_SOURCE,
+        EXTERNAL_CITATION, or ASSERTION. Assertions cannot exceed a warrant floor.
+    P2  Confidence is DERIVED, never self-reported. No agent's raw "73%" is
+        trusted (LLMs are systematically overconfident; §2.3).
+    P3  The judge is a separate non-participant. Debaters do not score debates
+        they are in (conflict of interest; Irving et al. 2018 debate model).
+    P4  Full traces are shared among debaters; context is never silently
+        partitioned (Cognition Principle 1).
+    P5  Roles are crisp and non-overlapping. Duplicate/ambiguous roles are the
+        single largest failure category (MAST; §2.4).
+    P6  Termination and budget are explicit and hard-capped. "Missing termination
+        conditions" is a named MAST failure mode; cost compounds ~10x on runaway.
+    P7  Memory compounds insight without compounding error. Encoded conclusions
+        remain challengeable; a mistakes ledger has equal standing (§10).
+    P8  In this domain, most disagreements are empirically resolvable. Prefer
+        running an experiment over running another debate round (§3.2, §11).
+
+
+===============================================================================
+ 2. RESEARCH FOUNDATIONS (the evidentiary basis)
+===============================================================================
+Each finding below is stated with the design constraint it imposes. Full
+citations in §18.
+
+2.1 MULTI-AGENT DEBATE IS MOSTLY AGGREGATION WEARING A COSTUME
+Du et al. (ICML 2024) showed multi-agent debate improves factuality/reasoning.
+Huang et al. (2310.01798) replicated it and found it only marginally beats
+self-consistency at equal sample count, and UNDERPERFORMS simple majority voting
+for the same number of responses; they argue it is better understood as
+"consistency," not "debate." A 2026 analysis attributes much of the benefit to
+aggregation alone.
+=> CONSTRAINT: The value is not the arguing. It is (a) diverse grounded evidence,
+   (b) aggregation, (c) external verification. Do not assume debate > voting;
+   PROVE it on your tasks (§15). If it doesn't win, keep this architecture but
+   swap the debate core for a voting core.
+
+2.2 HETEROGENEITY HELPS; HOMOGENEOUS CLONES DO NOT
+Adaptive Heterogeneous Multi-Agent Debate (A-HMAD) reports 4–6% absolute accuracy
+gains over standard debate and >30% fewer factual errors from DIVERSE specialized
+agents vs. homogeneous ones.
+=> CONSTRAINT: Distinct expert roles with distinct tools and priors — not N copies
+   of one prompt. This is the justification for the roster in §5.
+
+2.3 LLM CONFIDENCE IS SYSTEMATICALLY OVERCONFIDENT AND LOW-RESOLUTION
+FermiEval (2510.26995): nominal 99% confidence intervals covered truth ~65% of
+the time. Verbalized confidence is overconfident irrespective of correctness, and
+"saturates" — collapsing to coarse values like 0.9/1.0. Mitigations that work:
+aggregation across independent samples, proper scoring rules (Brier), CoT-
+ensembling (ECE reduced up to ~88% in one study).
+=> CONSTRAINT: Never elicit and trust a fine-grained percentage. Derive scores
+   from agreement + evidence + independent judge; bucket coarsely; calibrate with
+   proper scoring rules over time (§7).
+
+2.4 MOST MULTI-AGENT FAILURES ARE DESIGN, NOT MODEL
+MAST — "Why Do Multi-Agent LLM Systems Fail?" (Cemri et al., 2503.13657, NeurIPS
+2025): 1,600+ annotated traces across 7 frameworks (Cohen's kappa 0.88). Gains
+over single agents are often minimal. 14 failure modes in 3 buckets:
+    - Specification / system-design issues (~42%): task misinterpretation,
+      ambiguous role definitions, duplicate agent roles, poor decomposition,
+      MISSING TERMINATION CONDITIONS.
+    - Inter-agent misalignment (~37%): ignoring peer input, acting on incorrect
+      assumptions, derailment.
+    - Task verification (~21%): weak/absent verification, premature termination.
+Even deliberately EASY coding tasks fail. The fix is system design, not bigger
+models.
+=> CONSTRAINT: This taxonomy is the checklist the architecture is built against.
+   §14 maps every bucket to a concrete mechanism.
+
+2.5 CONVERGENCE/SYCOPHANCY IS THE REAL DANGER, NOT PERSISTENT DISAGREEMENT
+Peer exposure induces Asch-style conformity; debate is weakened by premature
+agreement and consensus-seeking. Agents can converge while LOSING factual content
+and viewpoint diversity — a "deliberative illusion" final-answer metrics miss.
+Without external feedback, LLMs often DEGRADE answers on reconsideration.
+=> CONSTRAINT: Reward warranted, preserved disagreement; treat rapid agreement as
+   SUSPECT. Anonymize speaker identity. Ground every reconsideration in a tool,
+   not in peer pressure (§7.4, §8).
+
+2.6 THE SINGLE-VS-MULTI WAR RESOLVED INTO A SYNTHESIS
+Cognition ("Don't Build Multi-Agents", 2025): partitioned context makes parallel
+subagents produce conflicting implicit decisions (the Flappy Bird example — a
+Mario background + a non-game-asset bird), forcing a costly reconciliation step;
+so share full traces and keep writes single-threaded. Anthropic ("How we built
+our multi-agent research system"): a lead + parallel subagents beat a single agent
+by 90.2% on their eval — but at ~15x the tokens, only worth it for high-value
+breadth-first tasks. By 2026 BOTH converged on role-scoped subagents under a
+coordinator, shared context, single-threaded writes. A SWE-bench leaderboard
+analysis found architecture (single vs multi) is NOT the deciding variable.
+=> CONSTRAINT: §1.2 (deliberate wide, execute narrow) + §3.4 (share full traces).
+
+2.7 THE CANONICAL REFERENCE IMPLEMENTATION IS A TOY (verified by reading it)
+composable-models/llm_multiagent_debate (Du et al.): 825 lines total; the debate
+loop is ~40 lines that concatenate peers' prior answers into the next prompt.
+Hardcoded 3 agents / 2 rounds. No judge, no tools, no retrieval, no scoring, no
+termination logic; the main loop ends on a pdb.set_trace() breakpoint. It is a
+research artifact.
+=> CONSTRAINT: There is no off-the-shelf base to inherit. Judge, evidence gating,
+   scoring, termination, and memory are all net-new and are the actual product.
+
+2.8 ANTHROPIC PLATFORM PRIMITIVES YOU CAN BUILD ON
+    - Agent SDK subagents: fresh isolated context, tailored system prompt, scoped
+      tool allowlist, optional per-agent model. Subagents cannot spawn subagents.
+      The parent↔subagent channel is only the prompt string + the returned final
+      message. For many-agent, script-driven orchestration there is a Workflow
+      mechanism that runs outside the conversation.
+    - Agent Skills: a folder with SKILL.md (YAML frontmatter: name + description).
+      Progressive disclosure in 3 tiers — metadata (~tens of tokens/skill) loaded
+      at startup; full SKILL.md loaded on match; bundled reference files loaded
+      only when needed. Anthropic explicitly recommends capturing "successful
+      approaches and common mistakes" into skills — this IS the deepening mechanic
+      (§10).
+    - Reported gap: the SDK ships no built-in cross-session state, durable
+      execution, observability, or multi-agent coordination beyond subagents-as-
+      tools. You build those (§12).
+
+2.9 PRIOR ART IN SOFTWARE-AGENT ROLE DESIGN
+MetaGPT (SOP-driven PM/Architect/Engineer + shared memory pool; but rigid roles,
+resource hallucinations referencing non-existent files/classes, costly GPT-4 call
+cascades, heavy asyncio). ChatDev (waterfall chat-chain; propagates early errors).
+MAGIS (Manager/Repository-Custodian/Developer/QA; ~8x over raw GPT-4 on SWE-bench
+issue resolution — a locator role + a reviewer role is a productive split).
+=> CONSTRAINT: Borrow the "locator + reviewer" split and shared memory; avoid rigid
+   waterfalls and unguarded code execution (§11 safety).
+
+
+===============================================================================
+ 3. DESIGN PRINCIPLES (distilled invariants)
+===============================================================================
+
+3.1 DELIBERATE WIDE / EXECUTE NARROW (from §2.6)
+The deliberation graph may run many agents. The moment a decision must be turned
+into changes, exactly one Executor acts, carrying the full deliberation verdict as
+context. No parallel writers.
+
+3.2 EVIDENCE-GATED CLAIMS (from §2.1, §2.5, §2.7)
+No claim rises above WARRANT floor "WEAK" without evidence. In this domain,
+"evidence" is preferentially a resolver-tool artifact: a green test, a reproduced
+eval number, a benchmark measurement. Retrieval and external citation are second
+tier. Bare assertion is capped.
+
+3.3 DERIVED, NOT ELICITED, CONFIDENCE (from §2.3)
+Scores are computed from inter-sample/agent agreement, evidence strength, and an
+independent judge rubric. Coarse 5-band scale. Proper scoring rules used to
+calibrate over time.
+
+3.4 SHARE FULL TRACES; ANONYMIZE IDENTITY (from §2.5, §2.6)
+Debaters see each other's full reasoning (prevents talking-past-each-other), but
+see peers under stable per-session anonymous handles, not role labels (blunts
+authority-driven conformity).
+
+3.5 CRISP, NON-OVERLAPPING ROLES (from §2.4)
+Every role has a one-line mandate, a unique "what it uniquely catches," and a
+distinct tool allowlist. Two roles that would catch the same class of problem are
+merged or one is cut.
+
+3.6 EXPLICIT TERMINATION + HARD BUDGET (from §2.4, §2.6)
+Convergence, marginal-gain, max-rounds, and budget stops are all defined and
+enforced by the Orchestrator, independent of any agent's opinion.
+
+3.7 MEMORY THAT COMPOUNDS INSIGHT, NOT ERROR (from §2.5, §2.8)
+Conclusions, open disagreements, and mistakes are persisted with warrant tags.
+Conclusions remain challengeable; a wrong past consensus must be supersedable so
+"deeper next session" does not mean "deeper into a hole."
+
+3.8 MEASURE BEFORE COMPLEXITY (from §2.1, §2.4, and the design maxim)
+The whole system is gated behind beating a single-agent + self-consistency
+baseline on a real eval set (§15).
+
+
+===============================================================================
+ 4. SYSTEM ARCHITECTURE (component model)
+===============================================================================
+
+4.1 TEXT DIAGRAM
+
+                         +---------------------------+
+                         |        ORCHESTRATOR       |
+                         |  (state machine, routing, |
+                         |   budget, termination)    |
+                         +------------+--------------+
+                                      |
+         +----------------+-----------+-----------+----------------+
+         |                |                       |                |
+         v                v                       v                v
+  +-------------+  +--------------+        +--------------+  +--------------+
+  |  DEBATER    |  |  DEBATER     |  ...   |   JUDGE /    |  | SYNTHESIZER  |
+  |  POOL       |  |  POOL        |        |  VERIFIER    |  | (neutral     |
+  | (scoped     |  | (scoped      |        | (scores,     |  |  write-up)   |
+  |  roles,     |  |  roles,      |        |  classifies  |  +------+-------+
+  |  own tools) |  |  own tools)  |        |  disputes)   |         |
+  +------+------+  +------+-------+        +------+-------+         v
+         |                |                       |         +--------------+
+         |  claims +      |  claims +             | verdicts|   EXECUTOR   |
+         |  provenance    |  provenance           |         | (SINGLE-     |
+         v                v                       |         |  THREADED    |
+  +------------------------------------------+    |         |  writes,     |
+  |            EVIDENCE / CLAIM BUS           |<---+         |  runs tests) |
+  |  (shared full traces, anonymized peers)  |              +--------------+
+  +----------------+-------------------------+
+                   |
+                   v
+  +------------------------------------------+     +------------------------+
+  |            RESOLVER TOOLS                 |     |        MEMORY          |
+  |  code sandbox | test runner | eval        |<--->|  Skills + 3 ledgers    |
+  |  harness | profiler | RAG retrieval       |     |  (conclusions / open   |
+  +------------------------------------------+     |   disagreements /      |
+                   ^                                |   mistakes), warrant-  |
+                   |                                |   tagged, challengeable|
+          Evidence store: Qdrant / pgvector <------+------------------------+
+
+4.2 COMPONENT RESPONSIBILITIES (summary; details in later sections)
+
+  ORCHESTRATOR (§9) — Mechanical control. Owns the state machine, round structure,
+    disagreement routing, budget accounting, circuit breakers, termination. Has NO
+    opinion on the question. Model tier: mid (cheap; it does routing, not
+    reasoning) or plain code where deterministic.
+
+  DEBATER POOL (§5) — The expert agents. Each: scoped mandate, distinct tools,
+    produces Claims with provenance. Sees full anonymized traces of peers.
+
+  JUDGE / VERIFIER (§5, §6, §7) — Separate non-participant. Assigns warrant bands,
+    classifies disagreements, gates uncited claims, produces the scored verdict.
+    Model tier: frontier.
+
+  SYNTHESIZER (§5) — Neutral final write-up: the decision, the warrant per claim,
+    and PRESERVED disagreements. May be the Architect role wearing a neutral hat,
+    but never the Judge.
+
+  EXECUTOR (§5) — Single agent that implements the accepted decision, runs tests,
+    reports results as new evidence. Only component that writes to the target repo/
+    environment.
+
+  EVIDENCE / CLAIM BUS (§6) — The shared substrate carrying all Claims and traces.
+    Anonymization applied here.
+
+  RESOLVER TOOLS (§11) — Sandbox, test runner, eval harness, profiler, retrieval.
+    Turn empirical disagreements into measurements.
+
+  MEMORY (§10) — Skills + three ledgers in Qdrant/pgvector. Loaded at framing,
+    written at session end.
+
+
+===============================================================================
+ 5. THE AGENT ROSTER (role charters)
+===============================================================================
+Roster is intentionally tight. More agents = more tokens (15x already) AND more
+convergence risk (§2.5). Start with the META roles + a 5-role debate core + the
+Executor; add roles only if an eval shows a missed failure class.
+
+Every charter has: MANDATE | UNIQUELY CATCHES | TOOLS | MODEL TIER | BOUNDARY.
+Each agent's system prompt is a versioned artifact (small changes to a lead prompt
+can unpredictably shift subagent behavior — keep them under version control and
+diff them in evals).
+
+--- META ROLES (not debaters) ---
+
+ORCHESTRATOR
+  MANDATE: Run the protocol. Decompose the task, assign roles, sequence rounds,
+    route disagreements, enforce budget/termination.
+  UNIQUELY CATCHES: runaway loops, budget overrun, missing termination.
+  TOOLS: state store, budget meter, dispatch (no reasoning tools).
+  MODEL TIER: mid / deterministic code.
+  BOUNDARY: never asserts a position on the question.
+
+JUDGE / VERIFIER
+  MANDATE: Assign warrant bands to claims; classify each disagreement; gate
+    uncited claims; emit the scored verdict.
+  UNIQUELY CATCHES: unwarranted claims dressed as facts; the 21% verification gap.
+  TOOLS: read-only access to Claim bus + Evidence store; may re-run a resolver to
+    confirm a claimed result (trust-but-verify).
+  MODEL TIER: frontier.
+  BOUNDARY: does not generate positions; only evaluates them. Not a debater.
+
+SYNTHESIZER
+  MANDATE: Produce the neutral decision write-up with per-claim warrant and
+    preserved disagreements.
+  UNIQUELY CATCHES: false consensus (it must report disagreements, not smooth
+    them over).
+  TOOLS: read-only Claim bus + verdict.
+  MODEL TIER: frontier.
+  BOUNDARY: adds no new claims; reports only adjudicated ones.
+
+--- DEBATE CORE (recommended 5) ---
+
+SOFTWARE ARCHITECT
+  MANDATE: System design, boundaries, data flow, coupling, interface contracts,
+    long-term evolvability.
+  UNIQUELY CATCHES: structural mistakes, leaky abstractions, wrong seams.
+  TOOLS: retrieval (docs/prior decisions), diagramming, code read.
+  MODEL TIER: frontier.
+  BOUNDARY: owns design shape, NOT operational runtime (SRE) or shipping-cost
+    (Pragmatist).
+
+QA / CORRECTNESS
+  MANDATE: Correctness, edge cases, contract adherence, test adequacy.
+  UNIQUELY CATCHES: logical defects, uncovered edge cases, missing tests.
+  TOOLS: test runner, code sandbox, retrieval.
+  MODEL TIER: mid.
+  BOUNDARY: correctness only, not performance (Empiricist/SRE) or security
+    (Hacker).
+
+RESEARCH SCIENTIST (ML/AI)
+  MANDATE: Modeling choices, algorithmic soundness, novelty, statistical validity
+    of evals, literature grounding.
+  UNIQUELY CATCHES: unsound ML methodology, invalid eval design, ignored prior art.
+  TOOLS: retrieval (papers/docs), eval harness, code sandbox.
+  MODEL TIER: frontier.
+  BOUNDARY: soundness/novelty, NOT production operability or shipping speed.
+
+HACKER (OFFENSIVE SECURITY)
+  MANDATE: Attack surface, auth/authz weaknesses, injection (incl. prompt
+    injection into this very system), supply-chain, data exfiltration paths.
+  UNIQUELY CATCHES: exploitable weaknesses others rationalize away.
+  TOOLS: code sandbox (isolated), retrieval (CVE/advisories), static analysis.
+  MODEL TIER: frontier.
+  BOUNDARY: adversarial exploitation, distinct from a defensive threat-model
+    checklist (fold defense into QA or add a dedicated role only if evals show a
+    gap). NOTE: this role reasons about vulnerabilities to harden the system; it
+    does not produce weaponized exploit code — findings are described and verified
+    in the sandbox, and remediation is the deliverable.
+
+SRE / OPERATIONS
+  MANDATE: What breaks in production — failure modes, observability, rollback,
+    blast radius, latency/throughput under load, on-call reality.
+  UNIQUELY CATCHES: operational failure the Architect (design elegance) and QA
+    (correctness) both miss.
+  TOOLS: profiler/benchmark, load simulation, code read, retrieval.
+  MODEL TIER: mid.
+  BOUNDARY: runtime operability, not design shape or research soundness.
+
+--- OPTIONAL DEBATE ROLES (add only if evals justify) ---
+
+EMPIRICIST / MEASUREMENT
+  MANDATE: Refuse claims lacking a benchmark or reproduction; own the "run the
+    experiment" instinct. In AI/ML this is the enforcer of P8.
+  UNIQUELY CATCHES: hand-wavy performance/quality claims.
+  TOOLS: eval harness, profiler, code sandbox.
+  MODEL TIER: mid.
+  BOUNDARY: demands measurement; does not itself argue design/security.
+  NOTE: If you keep the roster tight, the Empiricist FUNCTION can be enforced by
+  the Judge's provenance gate rather than a separate agent. Prefer that first.
+
+PRAGMATIST / SHIPPING
+  MANDATE: YAGNI, maintenance cost, deadline reality, reversibility of decisions.
+  UNIQUELY CATCHES: gold-plating and over-engineering by Architect/Scientist.
+  TOOLS: retrieval, code read.
+  MODEL TIER: mid.
+  BOUNDARY: cost-to-ship and maintainability, not correctness or security.
+
+--- EXECUTOR ---
+
+EXECUTOR
+  MANDATE: Implement the accepted decision as changes; run tests; report results.
+  UNIQUELY CATCHES: n/a (it acts, it does not debate).
+  TOOLS: full write access to target repo/env (isolated), test runner, sandbox.
+  MODEL TIER: frontier.
+  BOUNDARY: SINGLE INSTANCE. Never run parallel Executors on the same target.
+
+
+===============================================================================
+ 6. CLAIM & EVIDENCE MODEL (the data structures)
+===============================================================================
+This is the heart of the "iron hooks." Everything an agent says becomes a Claim
+with mandatory provenance; the Judge gates on it.
+
+6.1 CLAIM
+
+  Claim {
+    id:            uuid
+    round:         int
+    author_role:   enum(ARCHITECT, QA, SCIENTIST, HACKER, SRE, EMPIRICIST,
+                        PRAGMATIST)        # visible to Judge/Orchestrator only
+    author_anon:   string                  # stable per-session handle shown to peers
+    statement:     string
+    claim_type:    enum(EMPIRICAL, DEFINITIONAL, NORMATIVE, PROCEDURAL)
+    provenance:    enum(TOOL_RESULT, RETRIEVED_SOURCE, EXTERNAL_CITATION, ASSERTION)
+    evidence:      [EvidenceRef]           # MUST be non-empty unless provenance=ASSERTION
+    warrant_band:  enum(CONTESTED, WEAK, MODERATE, STRONG, VERIFIED)  # set by JUDGE
+    depends_on:    [claim_id]
+    contradicts:   [claim_id]
+    status:        enum(OPEN, SUPPORTED, REFUTED, SUPERSEDED)
+  }
+
+6.2 EVIDENCE REFERENCE
+
+  EvidenceRef {
+    kind:   enum(TEST_RUN, EVAL_RESULT, BENCHMARK, RETRIEVAL_HIT, WEB_SOURCE,
+                PRIOR_LEDGER, STATIC_ANALYSIS)
+    ref:    string          # sandbox run id / eval id / vector doc id / url / ledger id
+    digest: string          # short hash or summary for audit + dedup
+    metric: optional { name:string, value:number, unit:string, ci:optional }
+  }
+
+6.3 PROVENANCE TAXONOMY AND THE WARRANT CEILING (Judge policy)
+
+  provenance = TOOL_RESULT      -> eligible for up to VERIFIED
+  provenance = RETRIEVED_SOURCE -> eligible for up to STRONG
+  provenance = EXTERNAL_CITATION-> eligible for up to STRONG (if source authoritative)
+  provenance = ASSERTION        -> CAPPED at WEAK (reasoning-only, never "fact")
+
+The Judge assigns the actual band <= the ceiling based on corroboration and
+contradiction. A claim contradicted by a TOOL_RESULT drops to CONTESTED/REFUTED
+regardless of how confidently it was stated.
+
+6.4 THE GATE
+Before any claim influences the verdict, the Judge verifies:
+  - provenance present and consistent with evidence,
+  - evidence refs resolve (the run/doc actually exists; optionally re-run),
+  - no silent contradiction with a higher-warrant claim.
+Claims failing the gate are marked WEAK/CONTESTED and cannot anchor a decision.
+
+
+===============================================================================
+ 7. CONFIDENCE & SCORING MODEL
+===============================================================================
+Directly implements §2.3. The percentage the user wants exists, but it is an
+OUTPUT of measurement, never an INPUT from an agent.
+
+7.1 WHY NOT ELICITED PERCENTAGES
+LLM verbalized confidence is overconfident irrespective of correctness and
+saturates to 0.9/1.0. A crisp elicited "73%" is false precision on noise.
+
+7.2 THE FIVE WARRANT BANDS (the scale)
+  VERIFIED  — reproduced by a resolver tool (green test / eval number / benchmark).
+  STRONG    — multiple independent authoritative sources, no contradiction.
+  MODERATE  — single source or strong reasoning, not independently reproduced.
+  WEAK      — reasoning-only, plausible, unverified (ceiling for pure assertion).
+  CONTESTED — active unresolved disagreement, or refuted by evidence.
+
+7.3 DERIVED CLAIM SCORE
+  score(claim) = combine(
+      agreement:  fraction of INDEPENDENT samples/agents converging on it,
+      coverage:   the assigned warrant_band,
+      judge:      independent judge rubric score
+  )
+Report the BAND, not a raw number. If a numeric score is required downstream,
+compute it and CALIBRATE it with a proper scoring rule (Brier / log-loss) against
+resolved outcomes accumulated over sessions (§10 ledgers provide ground truth).
+Optionally ensemble multiple independent reasoning passes before scoring (the
+CoT-ensembling result: large ECE reductions).
+
+7.4 THE AGREEMENT SIGNAL, REDEFINED (implements §2.5)
+Do NOT treat "high agreement = good." Track the PAIR (agreement_level, mean_warrant):
+
+  low agreement  + low warrant  -> EPISTEMIC GAP     -> dispatch resolver tools;
+                                                        get evidence, don't re-argue.
+  low agreement  + high warrant -> GENUINE TRADEOFF  -> PRESERVE both; escalate to
+       (both sides)                                     human; this is a value call.
+  high agreement + low warrant  -> SUSPECT (possible  -> inject a challenge / require
+                                   sycophancy or         tool-backed evidence before
+                                   deliberative          accepting. Do NOT trust.
+                                   illusion)
+  high agreement + high warrant -> CONVERGED          -> terminate this thread.
+
+This turns "why do agents disagree" into an explicit, actionable classification,
+and correctly makes false consensus — not persistent disagreement — the thing the
+system distrusts.
+
+
+===============================================================================
+ 8. DISAGREEMENT MODEL
+===============================================================================
+
+8.1 DISAGREEMENT OBJECT
+
+  Disagreement {
+    id:               uuid
+    claim_a, claim_b: claim_id
+    dclass:           enum(EMPIRICAL, DEFINITIONAL, VALUE_TRADEOFF, ERROR)  # Judge-set
+    route:            enum(DISPATCH_RESOLVER, OPERATIONALIZE, ESCALATE_HUMAN, ADJUDICATE)
+    status:           enum(OPEN, RESOLVED, PRESERVED)
+    resolution:       optional EvidenceRef
+  }
+
+8.2 CLASS -> ROUTE (the routing table the Orchestrator executes)
+
+  EMPIRICAL      (a fact settles it)        -> DISPATCH_RESOLVER
+       Run the test/eval/benchmark. The disagreement collapses to a measurement.
+  DEFINITIONAL   (terms used differently)   -> OPERATIONALIZE
+       Force both parties to define the term operationally, then re-check. Most
+       "productive-looking" fights are actually this.
+  VALUE_TRADEOFF (no fact resolves it)      -> ESCALATE_HUMAN
+       e.g. latency vs cost vs time-to-ship. Surface the tradeoff explicitly with
+       each side's warrant; do NOT manufacture consensus. status -> PRESERVED.
+  ERROR          (one side is simply wrong) -> ADJUDICATE
+       Judge rules against the evidence. status -> RESOLVED.
+
+8.3 DEADLOCK POLICY
+An OPEN VALUE_TRADEOFF is not a failure to be looped on. It escalates once and is
+reported PRESERVED. Never spend rounds trying to collapse a genuine value call.
+
+
+===============================================================================
+ 9. ORCHESTRATION & CONTROL FLOW
+===============================================================================
+
+9.1 STATE MACHINE
+
+  INIT
+   -> LOAD_MEMORY        (retrieve topic ledgers from Qdrant/pgvector; §10)
+   -> FRAME              (decompose task; select roster; set budget B_max, R_max)
+   -> GROUND_INDEP       (round 0: each debater grounds via tools, NO peer view)
+   -> CRITIQUE           (shared-trace round: agents critique anonymized peers)
+   -> JUDGE              (assign warrant bands; classify disagreements)
+   -> ROUTE              (per §8.2, for each OPEN disagreement)
+        -> RESOLVE       (dispatch resolver tools; attach EvidenceRef)
+        -> OPERATIONALIZE
+        -> ESCALATE_HUMAN
+        -> ADJUDICATE
+   -> CONVERGENCE_CHECK  (§9.3)
+        -> (not converged AND budget remains) -> CRITIQUE     [loop]
+        -> (converged OR budget/round cap)     -> SYNTHESIZE
+   -> SYNTHESIZE         (neutral verdict + preserved disagreements)
+   -> EXECUTE?           (optional: single Executor implements; runs tests)
+   -> PERSIST_MEMORY     (write conclusions / open disagreements / mistakes)
+   -> DONE
+
+  Cross-cutting guards (can fire from any state):
+   - BUDGET_GUARD    -> force SYNTHESIZE when tokens/time near cap.
+   - CIRCUIT_BREAKER -> ABORT on runaway (e.g. resolver recursion, tool storm).
+
+9.2 ROUND STRUCTURE
+Round 0 is independent grounding with NO peer visibility (preserves diversity;
+prevents anchoring — cf. §2.5). Rounds 1..R_max are shared-trace critique with
+anonymized peers. Judge runs every round. Resolvers run on demand between rounds.
+
+9.3 TERMINATION CONDITIONS (all enforced by Orchestrator, agent-opinion-independent)
+  CONVERGENCE:   agreement >= theta AND mean_warrant >= MODERATE AND no OPEN
+                 EMPIRICAL disagreements.
+  MARGINAL_GAIN: delta(mean_warrant) over the last round < epsilon (diminishing
+                 returns -> stop).
+  MAX_ROUNDS:    round == R_max.
+  BUDGET:        tokens >= B_max OR wall_clock >= T_max.
+  DEADLOCK:      only OPEN disagreements remaining are VALUE_TRADEOFF -> escalate
+                 + synthesize (do not loop).
+
+9.4 BUDGET ENFORCEMENT & CIRCUIT BREAKERS (implements §2.4/§2.6 cost reality)
+  - Global token budget B_max per run; per-role sub-budgets.
+  - Max agents, max rounds, max resolver invocations per run.
+  - Resolver recursion depth = 0 for subagents (subagents cannot spawn subagents).
+  - "Marginal evidence gain" stop: if a round adds no new VERIFIED/STRONG claims,
+    do not fund another round.
+  - Task-value floor: if estimated cost > configured value ceiling for the task
+    class, REFUSE to run the full loop; fall back to single-agent (§13).
+
+
+===============================================================================
+ 10. MEMORY & CROSS-SESSION DEEPENING
+===============================================================================
+Implements the "each session goes deeper" requirement via the mechanism Anthropic
+explicitly recommends: capture successes and mistakes into skills. Backed by the
+existing RAG store.
+
+10.1 THE THREE LEDGERS
+  CONCLUSIONS        — decisions reached, each with warrant band + evidence digest.
+  OPEN_DISAGREEMENTS — unresolved value tradeoffs and epistemic gaps to revisit.
+  MISTAKES           — dead-ends, refuted claims, resource hallucinations, wrong
+                       past consensus. EQUAL STANDING to conclusions (§3.7).
+
+10.2 LEDGER ENTRY
+
+  LedgerEntry {
+    topic_key:     string          # coarse routing key (e.g. "rag.chunking",
+                                   #  "inference.ondevice", "auth.hce")
+    kind:          enum(CONCLUSION, OPEN_DISAGREEMENT, MISTAKE)
+    statement:     string
+    warrant_band:  enum(...)
+    evidence_digest: string
+    session_id:    uuid
+    timestamp:     iso8601
+    status:        enum(ACTIVE, CHALLENGED, SUPERSEDED)
+    supersedes:    optional entry_id
+  }
+
+10.3 STORAGE & LOADING
+  - Embed each entry; store in Qdrant/pgvector with structured metadata.
+  - At FRAME, retrieve entries by topic_key + semantic similarity to the task.
+  - Package durable, reusable lessons as a versioned Skill per topic
+    (SKILL.md + references), so progressive disclosure surfaces only the relevant
+    lessons cheaply. Metadata tier keeps many topics available at negligible token
+    cost; full lesson text loads only on match.
+
+10.4 PATH-DEPENDENCY GUARD (critical; implements §2.5/§3.7)
+  - Conclusions are CHALLENGEABLE: a new session with higher-warrant evidence can
+    set status=SUPERSEDED and write a superseding entry.
+  - The Judge consults MISTAKES at FRAME; repeating a logged dead-end is flagged.
+  - Never treat a prior CONCLUSION as VERIFIED unless it carries tool-backed
+    evidence; otherwise it re-enters as MODERATE/WEAK and must be re-warranted.
+  This prevents "deeper next session" from compounding an early wrong consensus
+  (the deliberative-illusion failure extended across time).
+
+
+===============================================================================
+ 11. EVIDENCE TOOLING (resolvers)
+===============================================================================
+The domain superpower: in Python backend + AI/ML work, most disagreements are
+empirically checkable, so "proofs only" is actually enforceable. Resolvers turn
+arguments into artifacts.
+
+11.1 RESOLVER SET
+  CODE SANDBOX    — execute arbitrary candidate code in isolation; return stdout/
+                    stderr/exit + artifacts. (Docker/K8s isolation; §11.3.)
+  TEST RUNNER     — run the project's test suite / targeted tests; green tests are
+                    VERIFIED-tier evidence for correctness claims.
+  EVAL HARNESS    — run a fixed eval set (retrieval recall, model accuracy, RAG
+                    answer quality); reproduced numbers settle ML quality claims.
+  PROFILER/BENCH  — measure latency/throughput/memory/cost under defined load;
+                    settles performance/cost claims (e.g. ONNX on-device vs server).
+  RETRIEVAL       — query Qdrant/pgvector for prior art, docs, and past ledgers;
+                    RETRIEVED_SOURCE-tier evidence.
+
+11.2 EVIDENCE CONTRACT
+Every resolver returns a structured EvidenceRef (§6.2) with a digest and, where
+applicable, a metric {name,value,unit,ci}. The Judge may re-run any resolver to
+confirm a claimed result (trust-but-verify), guarding against fabricated evidence
+(the "source fabrication" failure the better debate repos explicitly defend
+against).
+
+11.3 SAFETY (mandatory; learned from MetaGPT resource-hallucination failures and
+      general agent risk)
+  - Untrusted code executes ONLY in an isolated sandbox (no host FS, scoped
+    network, resource limits, ephemeral). Your Docker/K8s handles this.
+  - PROMPT INJECTION: content fetched by retrieval/web is DATA, not instructions.
+    The Hacker role explicitly probes for injection into this system; the
+    Orchestrator treats tool outputs as untrusted.
+  - The Executor writes only to an isolated working copy; promotion to the real
+    target is a separate, human-gated step for consequential changes.
+  - Resolvers validate that referenced files/classes exist before use (prevents
+    the MetaGPT-style "reference a non-existent asset -> execution fails" mode).
+
+
+===============================================================================
+ 12. TECHNOLOGY STACK & BUILD
+===============================================================================
+Mapped to the existing stack: FastAPI, Celery/Redis, Qdrant/pgvector,
+LangChain/LlamaIndex, PyTorch/ONNX, Docker/K8s, Claude/OpenAI APIs.
+
+12.1 ORCHESTRATION LAYER — TWO SANE OPTIONS (pick one; the middle is wrong)
+
+  OPTION A (recommended default): LangGraph for graph semantics + your existing
+    FastAPI/Celery/Redis for execution.
+    WHY: the deliberation is a stateful graph with cycles, conditional edges,
+    human-in-the-loop checkpoints, and durable resumable state — LangGraph's exact
+    sweet spot, with the best token control among the frameworks. Run the graph
+    inside Celery workers; Redis holds durable job state; LangGraph checkpoints the
+    deliberation state. Add LangSmith (or equivalent) for the tracing MAST demands.
+
+  OPTION B: own the orchestration entirely on FastAPI + Celery + Redis + the
+    Messages API. More upfront work; total control over the bespoke warrant/scoring
+    state machine (which no framework models natively). Justified precisely because
+    your "iron hooks" scoring is custom.
+
+  AVOID as the backbone: CrewAI / AutoGen. Role-frameworks are awkward to bend into
+    a deterministic state machine, and custom orchestration fights AutoGen's
+    conversation assumptions. Borrow AutoGen's debate PATTERNS as reference; do not
+    build the backbone on them.
+
+12.2 AGENT RUNTIME
+  - Use Claude Agent SDK subagents for research FAN-OUT inside a single role
+    (fresh isolated context, scoped tools, optional per-agent model). Remember:
+    subagents cannot spawn subagents; the only parent<->child channel is the
+    prompt + returned message, so pass file paths/errors/decisions explicitly.
+  - For many-agent, script-driven orchestration beyond a few delegations, use the
+    SDK Workflow mechanism (runs outside the conversation context).
+
+12.3 EVIDENCE + MEMORY
+  - Qdrant/pgvector: dual role — evidence store (retrieval resolver) AND cross-
+    session memory (ledgers/skills). Keep namespaces separate.
+  - LlamaIndex/LangChain: ingestion, chunking, retrieval plumbing for the RAG
+    resolver (reuse your production RAG pipeline).
+
+12.4 EXECUTION / ISOLATION
+  - Docker/K8s: sandbox for the code/test/eval/profiler resolvers and the Executor
+    working copy. Ephemeral, resource-capped, network-scoped.
+
+12.5 MODEL ROUTING (cost-shaped; from Anthropic's research-system economics)
+  - Frontier tier (Opus-class): Judge/Verifier, Software Architect, Research
+    Scientist, Synthesizer, Executor — where adjudication and consequential
+    reasoning happen.
+  - Mid tier (Sonnet-class): the general debater pool (QA, SRE, Pragmatist,
+    Empiricist).
+  - Small/fast tier (Haiku-class): research fan-out subagents, retrieval
+    summarization, routine classification, the Orchestrator's mechanical steps.
+  Pin TIERS in config, not exact model versions (versions churn; the architecture
+  is version-agnostic). Measure where tokens actually go and re-tune.
+
+12.6 OBSERVABILITY (non-optional; the SDK does not ship it and MAST requires it)
+  - Trace every claim, tool call, judge decision, and state transition.
+  - Retain deliberation transcripts (treat as logs with potentially sensitive
+    data: scope access, set retention).
+  - Instrument an LLM-as-judge failure annotator (§15) to classify traces by MAST
+    mode over time and watch the failure distribution shift as you intervene.
+
+
+===============================================================================
+ 13. COST MODEL & GUARDRAILS
+===============================================================================
+
+13.1 THE BASELINE REALITY
+Multi-agent runs ~15x the tokens of a single chat, and the multiplier only pays
+off for high-value tasks (Anthropic). This system is MORE than a fan-out — it
+loops with resolvers — so treat 15x as a floor, not a ceiling.
+
+13.2 COMPOUNDING RISK
+Runaway (recursive spawning, oversized tool returns, infinite source-hunting) can
+multiply cost ~10x further. The published multi-agent systems shipped WITHOUT
+circuit breakers and hit "50 subagents for a simple question." You must add them
+(§9.4).
+
+13.3 HARD CONTROLS (config-driven)
+  - B_max tokens / T_max wall-clock per run; per-role sub-budgets.
+  - Max rounds R_max; max agents; max resolver invocations.
+  - Marginal-gain stop (no new VERIFIED/STRONG claim -> no new round).
+  - TASK-VALUE FLOOR: classify tasks by value; if projected cost exceeds the floor
+    for that class, the Orchestrator REFUSES the full loop and runs single-agent +
+    self-consistency instead. Cheap questions must never enter the 15x path.
+
+13.4 COST ACCOUNTING
+Attribute tokens per role and per resolver; surface a per-run cost report. Use it
+to prune the roster (cut roles whose marginal contribution < their cost) and to
+re-tune model tiers.
+
+
+===============================================================================
+ 14. FAILURE MODES & MITIGATIONS (MAST-mapped)
+===============================================================================
+Every mitigation below maps to a mechanism defined earlier.
+
+14.1 SPECIFICATION / SYSTEM-DESIGN (~42% of failures)
+  Ambiguous/duplicate roles    -> crisp non-overlapping charters w/ distinct tools
+                                  and explicit BOUNDARY lines (§5).
+  Poor task decomposition      -> FRAME state decomposes before roster assignment
+                                  (§9.1).
+  MISSING TERMINATION          -> four explicit termination conditions enforced by
+                                  the Orchestrator (§9.3).
+  Task misinterpretation       -> operationalize definitional disagreements early
+                                  (§8.2).
+
+14.2 INTER-AGENT MISALIGNMENT (~37%)
+  Ignoring peer input          -> shared FULL traces on the Claim bus (§3.4).
+  Acting on wrong assumptions  -> provenance gate: assumptions capped at WEAK,
+                                  cannot anchor decisions (§6.3).
+  Authority-driven conformity  -> anonymized peer identity; suspect-flag on
+                                  high-agreement/low-warrant (§7.4).
+  Derailment / status spam     -> Orchestrator controls turn-taking; no free-form
+                                  cross-talk (§9.2).
+
+14.3 TASK VERIFICATION (~21%)
+  Weak/absent verification     -> separate Judge/Verifier + resolver tools as
+                                  ground truth (§5, §11).
+  Premature termination        -> convergence requires mean_warrant >= MODERATE AND
+                                  no OPEN empirical disagreements (§9.3).
+  Fabricated evidence          -> trust-but-verify: Judge may re-run resolvers;
+                                  EvidenceRef must resolve (§11.2).
+
+14.4 DEBATE-SPECIFIC FAILURES
+  Deliberative illusion /      -> reward preserved warranted disagreement; distrust
+   stance homogenization          fast agreement; round-0 independent grounding
+                                  (§7.4, §9.2).
+  Degradation on reconsideration-> reconsideration must be evidence-driven (a
+                                  resolver result), never peer-pressure-driven.
+  Debate ~= voting (no lift)   -> gated behind the baseline comparison (§15); if no
+                                  lift, swap to a voting core, keep the scaffold.
+
+14.5 EXECUTION FAILURES
+  Conflicting parallel writes  -> single-threaded Executor (§3.1).
+  Resource hallucination       -> resolvers validate referenced files/classes
+                                  exist; sandbox isolation (§11.3).
+  Prompt injection             -> tool outputs treated as untrusted data; Hacker
+                                  role probes injection paths (§11.3).
+
+
+===============================================================================
+ 15. EVALUATION & VALIDATION PLAN
+===============================================================================
+This section is how you avoid building an expensive system that doesn't beat a
+cheap one. It is the gate on the whole project.
+
+15.1 THE BASELINE (build FIRST, before the full loop)
+  - Single frontier agent + self-consistency (N independent samples, aggregate).
+  This is the number the whole architecture must beat. If AGORA cannot beat it on
+  your tasks, you do not have a case for the debate core.
+
+15.2 THE EVAL SET
+  - 30–50 REAL tasks from your backlog (backend + AI/ML decisions and reviews),
+    with known-good outcomes or expert-graded rubrics. Cover the domains your roles
+    claim to own (design, correctness, ML soundness, security, ops).
+
+15.3 METRICS (measure all four; not just accuracy)
+  - QUALITY: task accuracy / expert-rubric score vs baseline.
+  - COST: tokens and dollars per task (the 15x must buy proportional quality).
+  - CALIBRATION: Expected Calibration Error / Brier of the derived scores against
+    resolved outcomes (are the warrant bands honest?).
+  - AGREEMENT DYNAMICS: does the system converge appropriately, or exhibit
+    false-consensus / thrash? Track (agreement, mean_warrant) trajectories.
+
+15.4 THE DEBATE-VS-VOTE DECISION GATE
+  Run: baseline (self-consistency) vs. voting-core AGORA vs. debate-core AGORA,
+  controlling for token count. If debate does not beat voting at equal cost, ship
+  the VOTING core inside this same architecture (Judge + resolvers + memory are
+  independent of the core). Reference: "Debate or Vote" (NeurIPS 2025); Huang et
+  al. (§2.1).
+
+15.5 FAILURE-MODE TRACKING (continuous)
+  - Run an LLM-as-judge annotator over deliberation traces to classify failures by
+    MAST mode (the MAST paper ships a validated pipeline for this). Watch the
+    distribution move as you intervene. Gate prompt/model changes on the eval set,
+    not on vibes.
+
+15.6 REGRESSION GATING
+  - No role-prompt, model-tier, or protocol change ships without re-running the
+    eval set. Version prompts; diff behavior across versions.
+
+
+===============================================================================
+ 16. PHASED IMPLEMENTATION ROADMAP
+===============================================================================
+Each phase is gated: it must beat the previous phase on the §15 eval set before
+proceeding. This operationalizes "measure before complexity."
+
+  PHASE 0 — FOUNDATIONS
+    - Build the eval set (§15.2) and the baseline (§15.1).
+    - Stand up the resolver tools (sandbox/test/eval/profiler/retrieval) and the
+      Evidence store. These are useful even to the baseline.
+    - Deliverable: a reproducible number to beat.
+
+  PHASE 1 — SINGLE-ROUND DELIBERATION + JUDGE + EVIDENCE GATING
+    - 3–5 roles, one critique round, Claim model + provenance gate, Judge, warrant
+      bands. No memory, no loop.
+    - Gate: beats baseline on quality at acceptable cost.
+
+  PHASE 2 — MULTI-ROUND + DISAGREEMENT ROUTING + TERMINATION
+    - Add rounds, the disagreement classifier + routing table, convergence /
+      marginal-gain / budget termination, circuit breakers.
+    - Gate: quality up, cost bounded, no thrash.
+
+  PHASE 3 — RESOLVERS AS FIRST-CLASS RESOLUTION
+    - Wire empirical-disagreement -> dispatch-resolver so arguments become
+      measurements. Judge trust-but-verify.
+    - Gate: empirical disagreements resolve by evidence, not by more rounds.
+
+  PHASE 4 — MEMORY & DEEPENING
+    - Three ledgers + Skills packaging + path-dependency guard. Load at FRAME,
+      write at end.
+    - Gate: session N+1 measurably outperforms N on a repeated topic WITHOUT
+      inheriting a wrong consensus (test with a seeded-error case).
+
+  PHASE 5 — EXECUTOR & FULL LOOP
+    - Single-threaded Executor implements accepted decisions, runs tests, feeds
+      results back as evidence. Human gate on consequential promotion.
+    - Gate: end-to-end decision->implementation->verification on real tasks.
+
+  ONGOING — CALIBRATION & ROSTER TUNING
+    - Accumulate resolved outcomes; calibrate scores (Brier). Prune roles whose
+      marginal value < cost. Re-tune model tiers from the cost report.
+
+
+===============================================================================
+ 17. OPEN QUESTIONS & RISKS (honest unknowns)
+===============================================================================
+  R1  Debate vs vote on YOUR tasks is unproven. Mitigation: §15.4 gate. This is
+      the single biggest risk to the project's premise.
+  R2  Who judges the Judge? A single frontier judge can be wrong or miscalibrated.
+      Mitigations to evaluate: judge ensembles, calibrating judge scores against
+      resolved outcomes, periodic human spot-audit of verdicts.
+  R3  Calibration transfer: proper-scoring-rule calibration derived on one task
+      distribution may not transfer to another. Re-calibrate per domain.
+  R4  Cost ceilings in practice: real workloads may blow B_max often; the task-
+      value floor policy needs tuning so useful runs aren't starved and trivial
+      ones don't enter the 15x path.
+  R5  Roster tuning is empirical: the "right" number of roles is workload-specific;
+      start tight, expand only on demonstrated missed failure classes.
+  R6  Anonymization vs. capability routing tension: hiding role identity from peers
+      (anti-conformity) while the Orchestrator still routes by role — verify the
+      anonymization actually holds end-to-end and isn't leaked in phrasing.
+  R7  Prompt-injection through resolvers/retrieval is a live attack surface; the
+      Hacker role's findings on the system itself must be acted on, not just noted.
+
+
+===============================================================================
+ 18. GLOSSARY & REFERENCES
+===============================================================================
+
+18.1 KEY TERMS
+  Warrant band     — the evidence-strength tier assigned to a claim by the Judge.
+  Provenance       — the evidential origin of a claim (tool / retrieval / citation
+                     / assertion) that ceilings its warrant.
+  Resolver         — a tool that converts an empirical disagreement into a measured
+                     artifact (test/eval/benchmark/retrieval).
+  Deliberate wide / execute narrow — multi-agent for reasoning, single-agent for
+                     implementation.
+  Deliberative illusion — apparent consensus achieved by losing facts/diversity.
+
+18.2 REFERENCES (traceable basis; look these up for the full argument)
+  Agent/system design
+   - Anthropic, "Building Effective Agents" (research/building-effective-agents):
+     prompt-chaining, routing, parallelization, orchestrator-workers,
+     evaluator-optimizer; "add complexity only when it demonstrably improves
+     outcomes."
+   - Anthropic, "How we built our multi-agent research system"
+     (engineering/multi-agent-research-system): ~15x tokens; +90.2% vs single-agent
+     on their eval; lead-Opus/worker-Sonnet; artifact/external-memory pattern;
+     over-spawning and no-circuit-breaker failure modes.
+   - Anthropic, "Equipping agents for the real world with Agent Skills"
+     (engineering/...-agent-skills): SKILL.md, YAML frontmatter, 3-tier progressive
+     disclosure; capture successes AND mistakes into skills.
+   - Anthropic Agent SDK docs: subagents (isolated context, scoped tools, no
+     nested subagents), Workflow mechanism, sessions, hooks.
+   - Cognition, "Don't Build Multi-Agents": context-partitioning fragility; share
+     full traces; single-threaded writes; Flappy Bird example. (Plus the 2026
+     convergence toward scoped delegation.)
+
+  Empirical failure / debate analysis
+   - Cemri et al., "Why Do Multi-Agent LLM Systems Fail?" (arXiv:2503.13657,
+     NeurIPS 2025): MAST, 14 modes / 3 categories, 1,600+ traces, kappa 0.88;
+     failures are system-design, not model.
+   - Du et al., "Improving Factuality and Reasoning ... through Multiagent Debate"
+     (ICML 2024): the foundational debate result; canonical repo
+     composable-models/llm_multiagent_debate.
+   - Huang et al., "Large Language Models Cannot Self-Correct Reasoning Yet"
+     (arXiv:2310.01798): debate ~= self-consistency; underperforms majority voting
+     at equal samples.
+   - Irving et al., "AI safety via debate" (2018): two agents argue, a separate
+     JUDGE decides — the judge-separation principle.
+   - A-HMAD (Adaptive Heterogeneous Multi-Agent Debate): heterogeneous roles beat
+     homogeneous clones (4–6% acc, >30% fewer factual errors).
+   - "The Deliberative Illusion ..." and stance-convergence studies: convergence
+     can destroy factual content and diversity; sycophancy/conformity under peer
+     exposure; anonymization as mitigation.
+   - "Debate or Vote: Which Yields Better Decisions in Multi-Agent LLMs?"
+     (NeurIPS 2025): the debate-vs-aggregation decision.
+
+  Calibration
+   - FermiEval, "LLMs are Overconfident ..." (arXiv:2510.26995): 99% CIs cover
+     ~65%; overconfidence irrespective of correctness.
+   - Verbalized-confidence studies: saturation to 0.9/1.0; mitigations via
+     aggregation, proper scoring rules (Brier), CoT-ensembling (large ECE drops).
+
+  Software-agent prior art
+   - MetaGPT (SOP roles, shared memory; rigid roles, resource hallucinations,
+     costly, asyncio-heavy).
+   - ChatDev (waterfall chat-chain).
+   - MAGIS, "LLM-Based Multi-Agent Framework for GitHub Issue Resolution"
+     (arXiv:2403.17927): Manager/Custodian/Developer/QA; ~8x over raw GPT-4 on
+     SWE-bench.
+   - Framework landscape (2026 practitioner comparisons): LangGraph (stateful
+     graph, durable, HITL, best control), CrewAI (fast role-based prototyping),
+     AutoGen (conversational/debate patterns), vendor SDKs (single-agent + tools).
+   - Serious debate repos to study: mjsushanth/Multi_Agent_LLM_Debater (SocrAItic
+     Circle — multi-judge, evidence self-check, YAML prompts); instadeepai/DebateLLM
+     (cost/agreement benchmarking).
+
+===============================================================================
+ END OF SPECIFICATION v1.0
+ Next artifacts to generate on request: (a) LangGraph state-graph skeleton in
+ Python; (b) the seven role system-prompt files; (c) the Judge rubric as JSON;
+ (d) the eval-harness scaffold with the baseline runner.
+===============================================================================
