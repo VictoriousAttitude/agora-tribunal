@@ -12,3 +12,4 @@ __pycache__/
 # Run artifacts and secrets
 runs/
 .env
+.claude/settings.local.json
