@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import uuid
@@ -47,8 +48,11 @@ def load_board(path: str) -> dict:
 
 
 def save_board(path: str, board: dict) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_text(json.dumps(board, indent=2))
+    dest = Path(path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".tmp")
+    tmp.write_text(json.dumps(board, indent=2))
+    os.replace(tmp, dest)
 
 
 def emit(obj: dict) -> None:
@@ -58,7 +62,11 @@ def emit(obj: dict) -> None:
 def cmd_add(args: argparse.Namespace) -> None:
     board = load_board(args.board)
     known = {c["id"] for c in board["claims"]}
-    payload = json.load(sys.stdin)
+    try:
+        payload = json.load(sys.stdin)
+    except json.JSONDecodeError as exc:
+        emit({"accepted": [], "rejected": [], "gate_notes": [f"stdin parse error: {exc}"]})
+        return
     accepted: list[Claim] = []
     rejected: list[dict] = []
     notes: list[str] = []
@@ -87,7 +95,7 @@ def cmd_add(args: argparse.Namespace) -> None:
                 round=args.round,
                 author_role=Role(args.role),
                 author_anon=args.anon,
-                statement=str(raw["statement"]).strip(),
+                statement=str(raw["statement"]).strip()[:2000],
                 claim_type=ClaimType(raw["claim_type"]),
                 provenance=Provenance(claimed_prov),
                 evidence=evidence,
@@ -149,7 +157,11 @@ def cmd_render(args: argparse.Namespace) -> None:
 def cmd_judge(args: argparse.Namespace) -> None:
     board = load_board(args.board)
     by_id = {c["id"]: c for c in board["claims"]}
-    payload = json.load(sys.stdin)
+    try:
+        payload = json.load(sys.stdin)
+    except json.JSONDecodeError as exc:
+        emit({"error": f"judge stdin parse error: {exc}"})
+        return
     clamped: list[str] = []
 
     for a in payload.get("assessments", []):
