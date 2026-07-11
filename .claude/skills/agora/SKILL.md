@@ -59,7 +59,7 @@ Complete when: check-decision reports ok with no warnings on load-bearing claims
 
 ## 8. LEDGER and ARTIFACTS
 
-Write `<run_dir>/transcript.md`: frame, per-round prose links, final board render, disagreement table, decision. Append to `ledgers/ledger.md`: each conclusion with band and run id under Conclusions; OPEN/PRESERVED items under Open disagreements; any prior ledger conclusion this run refuted gets marked SUPERSEDED and a line under Mistakes.
+Write `<run_dir>/transcript.md`: frame, per-round prose links, final board render, disagreement table, decision. Append to `ledgers/ledger.md`: each conclusion with band and run id under Conclusions; OPEN/PRESERVED items under Open disagreements; any prior ledger conclusion this run refuted gets marked SUPERSEDED and a line under Mistakes. A conclusion earns a ledger line only if it is hard to reverse, surprising without context, or the result of a real trade-off; everything else lives in the run transcript — the ledger is for decisions the future orchestrator must not relearn.
 Show the user: the decision, PRESERVED value trade-offs as questions that belong to them, and the run dir path.
 Complete when: the ledger diff is shown.
 

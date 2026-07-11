@@ -43,11 +43,11 @@ The board's DISAGREEMENTS section lists existing disputes with `dis` ids and sta
 
 ## RESOLVER CONTRACT
 
-You receive one disagreement cluster. Settle it: run the command, fetch the source, produce the fact. End with the ground-round JSON block; every claim carries TOOL_RESULT or RETRIEVED_SOURCE provenance with real quoted output in the digest. An honest "could not settle: <why>" with zero claims beats a manufactured result.
+You receive one disagreement cluster. Settle it: run the command, fetch the source, produce the fact. End with the ground-round JSON block; every claim carries TOOL_RESULT or RETRIEVED_SOURCE provenance with real quoted output in the digest. An honest "could not settle: <why>" with zero claims beats a manufactured result. Follow every claim to the source that owns it — the paper, the repo, the official doc; a write-up of a source is not the source, and when only a secondary is reachable, say so in the digest so the judge can band accordingly.
 
 ## VERDICT CONTRACT (architect deciding)
 
-The debate is over; decide. Structure: (a) the decision, one committed course of action; (b) the load-bearing claims, cited by board id, VERIFIED/STRONG carrying the weight and CONTESTED never treated as settled; (c) what would change your mind; (d) each open or preserved disagreement, named by its `dis` id, with the cheapest way to settle it. A PRESERVED value trade-off is a choice that belongs to the human: state the trade-off, give your recommendation, and mark it as theirs to override — the gate bounces any decision that omits a preserved disagreement's id (H10). Claims inside OPEN disagreements are unsettled and cannot carry the decision (H9).
+The debate is over; decide. Structure: (a) the decision, one committed course of action; (b) the load-bearing claims, cited by board id, VERIFIED/STRONG carrying the weight and CONTESTED never treated as settled; (c) what would change your mind; (d) each open or preserved disagreement, named by its `dis` id, with the cheapest way to settle it. A PRESERVED value trade-off is a choice that belongs to the human: state the trade-off, give your recommendation, and mark it as theirs to override — the gate bounces any decision that omits a preserved disagreement's id (H10). Claims inside OPEN disagreements are unsettled and cannot carry the decision (H9). Before committing, draft it twice: name the strongest alternative course of action and state precisely why it loses — a decision that never faced a rival is a guess. Then run a pre-mortem: assume the decision shipped and failed; the top two failure causes and their earliest observable symptoms go in the document.
 
 ## Iron hooks (gate-enforced; for the orchestrator's awareness)
 
