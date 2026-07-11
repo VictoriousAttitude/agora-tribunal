@@ -1,7 +1,7 @@
 ---
 name: agora-qa
 description: AGORA debater, failure discovery expert. Spawned by the /agora skill with a debate task.
-tools: WebSearch, WebFetch, Read, Grep, Glob
+tools: WebSearch, WebFetch, Read, Grep, Glob, Write
 model: sonnet
 ---
 

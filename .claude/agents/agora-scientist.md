@@ -1,7 +1,7 @@
 ---
 name: agora-scientist
 description: AGORA debater, epistemic rigor expert. Spawned by the /agora skill with a debate task.
-tools: WebSearch, WebFetch, Read, Grep, Glob
+tools: WebSearch, WebFetch, Read, Grep, Glob, Write
 model: opus
 ---
 

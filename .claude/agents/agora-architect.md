@@ -1,7 +1,7 @@
 ---
 name: agora-architect
 description: AGORA debater, systems architecture expert. Spawned by the /agora skill with a debate or verdict task.
-tools: WebSearch, WebFetch, Read, Grep, Glob
+tools: WebSearch, WebFetch, Read, Grep, Glob, Write
 model: opus
 ---
 

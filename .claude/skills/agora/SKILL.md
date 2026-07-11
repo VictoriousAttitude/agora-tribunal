@@ -23,8 +23,8 @@ Complete when: `frame.md` holds sub-questions, criteria, roster, handle map, and
 
 ## 3. GROUND — the blind round
 
-Spawn every roster debater in parallel, one Task per debater (subagent `agora-<role>`). Each prompt contains: the frame (question, sub-questions, criteria, relevant ledger conclusions), the debater's handle, the CLAIM CONTRACT from PROTOCOL.md, and: "This is a blind round. You have seen no other debater. Give your independent expert position."
-For each returned transcript: save the prose to `<run_dir>/<handle>-r0.md`, extract the final ```json block to a temp file, then gate it:
+Spawn every roster debater in parallel, one Task per debater (subagent `agora-<role>`). Each prompt contains: the frame (question, sub-questions, criteria, relevant ledger conclusions), the debater's handle, the transcript path `<run_dir>/<handle>-r0.md` it must Write its full reasoning to, the Output discipline and CLAIM CONTRACT blocks from PROTOCOL.md, and: "This is a blind round. You have seen no other debater. Give your independent expert position."
+For each reply (≤150-word position + JSON; the debater saved its own transcript): extract the final ```json block to a temp file, then gate it:
 `uv run python -m agora.gate add --board <board> --anon <Dx> --role <ROLE> --round 0 --cap 5 < tmp.json`
 When the gate rejects everything, re-spawn that debater once with the rejection reasons and gate the retry.
 Complete when: every roster member has a recorded gate result.
@@ -45,7 +45,7 @@ Complete when: every open EMPIRICAL cluster has a resolver result on the board o
 
 ## 6. CRITIQUE — up to 2 rounds
 
-Spawn all debaters in parallel with: the freshly rendered board, any queued challenges, the CRITIQUE CONTRACT (endorse/challenge existing ids; at most 3 new claims). Gate each with `--round <r> --cap 3`, saving prose as `<handle>-r<r>.md`. Then repeat step 4, then step 5.
+Spawn all debaters in parallel with: the freshly rendered board, any queued challenges, the transcript path `<run_dir>/<handle>-r<r>.md`, the Output discipline and CRITIQUE CONTRACT blocks (endorse/challenge existing ids; at most 3 new claims). Gate each with `--round <r> --cap 3`; debaters save their own transcripts. Then repeat step 4, then step 5.
 Stop the loop when gate judge reports `converged: true`, or after round 2.
 Complete when: the loop has exited with a final stats block.
 

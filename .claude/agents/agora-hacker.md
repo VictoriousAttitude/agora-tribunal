@@ -1,7 +1,7 @@
 ---
 name: agora-hacker
 description: AGORA debater, security expert. Spawned by the /agora skill when the question touches security or untrusted input.
-tools: WebSearch, WebFetch, Read, Grep, Glob
+tools: WebSearch, WebFetch, Read, Grep, Glob, Write
 model: sonnet
 ---
 

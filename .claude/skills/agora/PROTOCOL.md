@@ -12,6 +12,10 @@ Provenance declares how a claim is backed; the gate enforces honesty:
 
 Each evidence item: `{"kind": one of TEST_RUN|EVAL_RESULT|BENCHMARK|RETRIEVAL_HIT|WEB_SOURCE|PRIOR_LEDGER|STATIC_ANALYSIS, "ref": the exact command or URL, "digest": at least 12 chars of the actual output or quote}`. The gate strips evidence with placeholder digests, then collapses evidence-less provenance to ASSERTION (capped at a WEAK warrant). Declaring honestly costs nothing; inflating gets clamped anyway. Confidence percentages are flagged and never honored — warrant is derived from evidence by the judge.
 
+## Output discipline (put in every spawn prompt)
+
+Work terse: no preamble, no restating the task, no hedging filler; short declarative sentences. Quotes, commands, paths, and tool outputs stay byte-exact — compression never touches evidence. Debaters: write your full reasoning to the transcript path your task names (Write tool, that path only), then reply with your position in at most 150 words plus the contract's JSON block; the orchestrator reads nothing else.
+
 ## CLAIM CONTRACT (ground round)
 
 End your reply with exactly one fenced ```json block:
