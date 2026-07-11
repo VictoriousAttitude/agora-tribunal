@@ -49,10 +49,13 @@ Spawn all debaters in parallel with: the freshly rendered board, any queued chal
 Stop the loop when gate judge reports `converged: true`, or after round 2.
 Complete when: the loop has exited with a final stats block.
 
-## 7. VERDICT — the Architect decides
+## 7. VERDICT — draft, attack, decide
 
-Spawn a fresh `agora-architect` with: the rendered judged board, all disagreements with status, the ledger notes, and the VERDICT CONTRACT. Pipe its decision text through `... gate check-decision --board <board>`. On problems, return them to the same subagent once for revision; if problems persist, surface them in the output.
-Complete when: check-decision reports ok, or one revision cycle is done.
+Spawn a fresh `agora-architect` with: the rendered judged board (which includes the disagreement table), the ledger notes, and the VERDICT CONTRACT. Pipe its draft through `... gate check-decision --board <board>`.
+Act on the report:
+- `warnings` lists UNSCRUTINIZED claims: the draft leans on claims no adversary ever reviewed. Spawn 2 debaters who did not author them (CRITIQUE CONTRACT, `--round <next> --cap 2`) with only those claims and: "The pending decision rests on these claims. Attack them seriously or find evidence that earns their weight." Gate their output, repeat step 4 (judge), then hand the fresh render and the prior draft back to the architect for a final decision. One scrutiny cycle maximum.
+- `problems` non-empty: return them to the same subagent once for revision; if problems persist after that, surface them verbatim in the output.
+Complete when: check-decision reports ok with no warnings on load-bearing claims, or the one scrutiny cycle and one revision cycle are both spent.
 
 ## 8. LEDGER and ARTIFACTS
 

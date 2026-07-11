@@ -15,6 +15,7 @@ import argparse
 import json
 import re
 import sys
+import uuid
 from pathlib import Path
 
 from agora.models import (
@@ -138,6 +139,11 @@ def cmd_render(args: argparse.Namespace) -> None:
         ev = f" evidence={len(c['evidence'])}" if c["evidence"] else ""
         print(f"[{c['id']}] ({c['author_anon']}, r{c['round']}, {c['claim_type']}, "
               f"{c['provenance']}{ev}{band}, +{plus}/-{minus}) {c['statement']}")
+    if board["disagreements"]:
+        print("\nDISAGREEMENTS")
+        for d in board["disagreements"]:
+            print(f"[dis {d.get('id', '?')}] ({d['dclass']}, {d['status']}, "
+                  f"claims={','.join(d['claim_ids'])}) {d.get('rationale', '')}")
 
 
 def cmd_judge(args: argparse.Namespace) -> None:
@@ -163,7 +169,13 @@ def cmd_judge(args: argparse.Namespace) -> None:
             c["warrant_band"] = clamp_band(
                 WarrantBand.WEAK, Provenance(c["provenance"])).value
 
-    disagreements = []
+    # Disagreements are a lifecycle, never wiped: existing entries persist
+    # until an explicit resolution. The judge declares new clusters and may
+    # resolve open ones; re-declaring an existing cluster updates rationale.
+    disagreements = board["disagreements"]
+    for d in disagreements:
+        d.setdefault("id", uuid.uuid4().hex[:12])
+    by_key = {(frozenset(d["claim_ids"]), d["dclass"]): d for d in disagreements}
     for d in payload.get("disagreements", []):
         ids = [i for i in d.get("claim_ids", []) if i in by_id]
         if len(ids) < 2:
@@ -172,14 +184,34 @@ def cmd_judge(args: argparse.Namespace) -> None:
             dclass = DisagreementClass(d["dclass"])
         except Exception:
             continue
+        key = (frozenset(ids), dclass.value)
+        if key in by_key:
+            if d.get("rationale"):
+                by_key[key]["rationale"] = str(d["rationale"])[:400]
+            continue
         route = CLASS_ROUTE[dclass]
         status = (DisagreementStatus.PRESERVED
                   if route == DisagreementRoute.ESCALATE_HUMAN
                   else DisagreementStatus.OPEN)
-        disagreements.append({"claim_ids": ids, "dclass": dclass.value,
-                              "route": route.value, "status": status.value,
-                              "rationale": str(d.get("rationale", ""))[:400]})
-    board["disagreements"] = disagreements
+        entry = {"id": uuid.uuid4().hex[:12], "claim_ids": ids,
+                 "dclass": dclass.value, "route": route.value,
+                 "status": status.value,
+                 "rationale": str(d.get("rationale", ""))[:400]}
+        disagreements.append(entry)
+        by_key[key] = entry
+
+    by_did = {d["id"]: d for d in disagreements}
+    resolved: list[str] = []
+    for r in payload.get("resolutions", []):
+        d = by_did.get(r.get("disagreement_id")) if isinstance(r, dict) else None
+        if d is None or d["status"] != DisagreementStatus.OPEN.value:
+            continue
+        if r.get("status") != DisagreementStatus.RESOLVED.value:
+            continue
+        d["status"] = DisagreementStatus.RESOLVED.value
+        if r.get("rationale"):
+            d["rationale"] = str(r["rationale"])[:400]
+        resolved.append(d["id"])
 
     suspects = []  # H8: agreement is not evidence
     for c in board["claims"]:
@@ -199,6 +231,7 @@ def cmd_judge(args: argparse.Namespace) -> None:
                            if d["status"] == "OPEN" and d["dclass"] == "EMPIRICAL"],
         "suspect_consensus": suspects,
         "clamped": clamped,
+        "resolved": resolved,
     })
 
 
@@ -206,8 +239,17 @@ def cmd_check_decision(args: argparse.Namespace) -> None:
     board = load_board(args.board)
     by_id = {c["id"]: c for c in board["claims"]}
     text = sys.stdin.read()
-    cited = sorted(set(ID_RE.findall(text)))
-    report, problems = [], []
+    found = set(ID_RE.findall(text))
+    dis = board["disagreements"]
+    dis_ids = {d["id"] for d in dis if d.get("id")}
+    open_member: dict[str, list[str]] = {}
+    for d in dis:
+        if d["status"] == "OPEN":
+            for i in d["claim_ids"]:
+                open_member.setdefault(i, []).append(d.get("id", "?"))
+
+    report, problems, warnings = [], [], []
+    cited = sorted(found - dis_ids)
     for cid in cited:
         c = by_id.get(cid)
         if c is None:
@@ -217,9 +259,25 @@ def cmd_check_decision(args: argparse.Namespace) -> None:
         report.append({"id": cid, "band": band, "statement": c["statement"][:100]})
         if band == "CONTESTED":
             problems.append(f"{cid}: CONTESTED claim treated as load-bearing (H9)")
-    if not cited:
+        if cid in open_member:
+            problems.append(f"{cid}: inside OPEN disagreement "
+                            f"{','.join(open_member[cid])}, not settled (H9)")
+        plus, minus = _endorsement_score(board, cid)
+        if plus + minus == 0:
+            warnings.append(f"{cid}: UNSCRUTINIZED, no debater ever endorsed "
+                            "or challenged this claim")
+    for d in dis:
+        if d["status"] != "PRESERVED":
+            continue
+        disclosed = (d.get("id") in found
+                     or any(i in found for i in d["claim_ids"]))
+        if not disclosed:
+            problems.append(f"preserved disagreement {d.get('id', '?')} "
+                            "not disclosed in decision (H10)")
+    if not any(cid in by_id for cid in cited):
         problems.append("decision cites no claim ids at all (H9)")
-    emit({"cited": report, "problems": problems, "ok": not problems})
+    emit({"cited": report, "problems": problems, "warnings": warnings,
+          "ok": not problems})
 
 
 def main() -> None:
